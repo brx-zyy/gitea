@@ -597,3 +597,5 @@ func TestCompletedTaskTokenStillAuthenticatesFromCache(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, got)
 }
+
+// CI trigger: rerun the fork's pull-request workflows for the cache regression test.
