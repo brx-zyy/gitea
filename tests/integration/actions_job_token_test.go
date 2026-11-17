@@ -482,6 +482,11 @@ func TestCompletedActionsTaskTokenCanStillWriteThroughCache(t *testing.T) {
 	task := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionTask{ID: 53})
 	require.Equal(t, repo.ID, task.RepoID)
 
+	require.NoError(t, db.Insert(t.Context(), &repo_model.RepoUnit{
+		RepoID: repo.ID,
+		Type:   unit_model.TypeActions,
+		Config: &repo_model.ActionsConfig{},
+	}))
 	repoActionsUnit := repo.MustGetUnit(t.Context(), unit_model.TypeActions)
 	repoActionsCfg := repoActionsUnit.ActionsConfig()
 	repoActionsCfg.OverrideOwnerConfig = true
