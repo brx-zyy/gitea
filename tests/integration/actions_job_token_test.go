@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"testing"
 
+	runnerv1 "gitea.dev/actionslib/runner/v1"
 	actions_model "gitea.dev/models/actions"
 	auth_model "gitea.dev/models/auth"
 	"gitea.dev/models/db"
@@ -468,4 +469,64 @@ func createActionTask(t *testing.T, repoID int64, isFork bool) *actions_model.Ac
 	task.GenerateAndFillToken()
 	require.NoError(t, db.Insert(t.Context(), task))
 	return task
+}
+
+// TestCompletedActionsTaskTokenCanStillWriteThroughCache documents the HTTP impact
+// of a completed task token remaining valid in the token cache.
+func TestCompletedActionsTaskTokenCanStillWriteThroughCache(t *testing.T) {
+	defer tests.PrepareTestEnv(t)()
+	auth_model.TokenCache().Purge()
+	t.Cleanup(auth_model.TokenCache().Purge)
+
+	user := unittest.AssertExistsAndLoadBean(t, &user_model.User{ID: 2})
+	repo := unittest.AssertExistsAndLoadBean(t, &repo_model.Repository{ID: 2})
+	task := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionTask{ID: 53})
+	require.Equal(t, repo.ID, task.RepoID)
+
+	require.NoError(t, db.Insert(t.Context(), &repo_model.RepoUnit{
+		RepoID: repo.ID,
+		Type:   unit_model.TypeActions,
+		Config: &repo_model.ActionsConfig{},
+	}))
+	repoActionsUnit := repo.MustGetUnit(t.Context(), unit_model.TypeActions)
+	repoActionsCfg := repoActionsUnit.ActionsConfig()
+	repoActionsCfg.OverrideOwnerConfig = true
+	repoActionsCfg.TokenPermissionMode = repo_model.ActionsTokenPermissionModePermissive
+	repoActionsCfg.MaxTokenPermissions = nil
+	require.NoError(t, repo_model.UpdateRepoUnitConfig(t.Context(), repoActionsUnit))
+
+	task.GenerateAndFillToken()
+	task.Status = actions_model.StatusRunning
+	require.NoError(t, actions_model.UpdateTask(t.Context(), task, "token_hash", "token_salt", "token_last_eight", "status"))
+
+	taskToken := task.Token
+	require.NotEmpty(t, taskToken)
+
+	// Authenticate once while the task is running, populating the token cache.
+	req := NewRequest(t, "GET", "/api/v1/user").AddTokenAuth(taskToken)
+	resp := MakeRequest(t, req, http.StatusOK)
+	actionUser := DecodeJSON(t, resp, &structs.User{})
+	assert.Equal(t, "gitea-actions", actionUser.UserName)
+
+	// Complete the task through the same state-update path used by the runner,
+	// without evicting its token-cache entry.
+	_, err := actions_model.UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id:     task.ID,
+		Result: runnerv1.Result_RESULT_SUCCESS,
+	})
+	require.NoError(t, err)
+	completed := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionTask{ID: task.ID})
+	require.Equal(t, actions_model.StatusSuccess, completed.Status)
+
+	// A completed task's cached token should no longer authorize repository writes.
+	branchURL := fmt.Sprintf("/api/v1/repos/%s/%s/branches", user.Name, repo.Name)
+	req = NewRequestWithJSON(t, "POST", branchURL, &structs.CreateBranchRepoOption{
+		BranchName: "completed-task-token-write-test",
+	}).AddTokenAuth(taskToken)
+	MakeRequest(t, req, http.StatusCreated)
+
+	// Control: the same token is rejected once the cache entry is evicted.
+	auth_model.TokenCache().Purge()
+	req = NewRequest(t, "GET", "/api/v1/user").AddTokenAuth(taskToken)
+	MakeRequest(t, req, http.StatusUnauthorized)
 }
