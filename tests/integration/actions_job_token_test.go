@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"testing"
 
+	runnerv1 "gitea.dev/actionslib/runner/v1"
+
 	actions_model "gitea.dev/models/actions"
 	auth_model "gitea.dev/models/auth"
 	"gitea.dev/models/db"
@@ -507,9 +509,15 @@ func TestCompletedActionsTaskTokenCanStillWriteThroughCache(t *testing.T) {
 	actionUser := DecodeJSON(t, resp, &structs.User{})
 	assert.Equal(t, "gitea-actions", actionUser.UserName)
 
-	// Complete the task without evicting its token-cache entry.
-	task.Status = actions_model.StatusSuccess
-	require.NoError(t, actions_model.UpdateTask(t.Context(), task, "status"))
+	// Complete the task through the same state-update path used by the runner,
+	// without evicting its token-cache entry.
+	_, err := actions_model.UpdateTaskByState(t.Context(), task.RunnerID, &runnerv1.TaskState{
+		Id:     task.ID,
+		Result: runnerv1.Result_RESULT_SUCCESS,
+	})
+	require.NoError(t, err)
+	completed := unittest.AssertExistsAndLoadBean(t, &actions_model.ActionTask{ID: task.ID})
+	require.Equal(t, actions_model.StatusSuccess, completed.Status)
 
 	// A completed task's cached token should no longer authorize repository writes.
 	branchURL := fmt.Sprintf("/api/v1/repos/%s/%s/branches", user.Name, repo.Name)
