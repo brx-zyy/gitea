@@ -553,7 +553,6 @@ func newRunningTaskForCancelling(t *testing.T, name string, hasCancellingSupport
 	return task, job
 }
 
-
 // TestCompletedTaskTokenStillAuthenticatesFromCache documents the current cache-hit behavior:
 // after a task is completed, its token still resolves while the cache entry exists.
 func TestCompletedTaskTokenStillAuthenticatesFromCache(t *testing.T) {
