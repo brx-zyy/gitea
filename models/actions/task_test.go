@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	runnerv1 "gitea.dev/actionslib/runner/v1"
+	auth_model "gitea.dev/models/auth"
 	"gitea.dev/models/db"
 	repo_model "gitea.dev/models/repo"
 	"gitea.dev/models/unit"
@@ -550,4 +551,49 @@ func newRunningTaskForCancelling(t *testing.T, name string, hasCancellingSupport
 	require.NoError(t, err)
 
 	return task, job
+}
+
+
+// TestCompletedTaskTokenStillAuthenticatesFromCache documents the current cache-hit behavior:
+// after a task is completed, its token still resolves while the cache entry exists.
+func TestCompletedTaskTokenStillAuthenticatesFromCache(t *testing.T) {
+	require.NoError(t, unittest.PrepareTestDatabase())
+	ctx := t.Context()
+
+	auth_model.TokenCache().Purge()
+	t.Cleanup(auth_model.TokenCache().Purge)
+
+	task, _ := newRunningTaskForCancelling(t, "completed-token-cache-test", true)
+	task.GenerateAndFillToken()
+	affected, err := db.GetEngine(ctx).ID(task.ID).
+		Cols("token_salt", "token_hash", "token_last_eight").
+		Update(task)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, affected)
+
+	// The first lookup authenticates the running task and populates the cache.
+	got, err := GetRunningTaskByToken(ctx, task.Token)
+	require.NoError(t, err)
+	require.Equal(t, StatusRunning, got.Status)
+
+	// Complete the task through the same state-update path used by the runner.
+	_, err = UpdateTaskByState(ctx, task.RunnerID, &runnerv1.TaskState{
+		Id:     task.ID,
+		Result: runnerv1.Result_RESULT_SUCCESS,
+	})
+	require.NoError(t, err)
+
+	completed := unittest.AssertExistsAndLoadBean(t, &ActionTask{ID: task.ID})
+	require.Equal(t, StatusSuccess, completed.Status)
+
+	// BUG: the cache-hit path returns the completed task instead of rejecting its token.
+	got, err = GetRunningTaskByToken(ctx, task.Token)
+	require.NoError(t, err)
+	require.Equal(t, StatusSuccess, got.Status)
+
+	// Control: after cache eviction, the DB path correctly rejects the completed task.
+	auth_model.TokenCache().Purge()
+	got, err = GetRunningTaskByToken(ctx, task.Token)
+	require.Error(t, err)
+	require.Nil(t, got)
 }
